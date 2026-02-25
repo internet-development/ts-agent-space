@@ -198,6 +198,20 @@ export class SpaceServer {
     //NOTE(jimmylee): Check if already registered (reconnect case)
     if (this.agents.has(ws)) return;
 
+    //NOTE(jimmylee): Dedup by agent name — if an agent with the same name already exists,
+    //NOTE(jimmylee): close the stale connection before registering the new one
+    for (const [existingWs, existingAgent] of this.agents) {
+      if (existingAgent.name === msg.name) {
+        this.agents.delete(existingWs);
+        try {
+          existingWs.close(4002, 'Replaced by new connection');
+        } catch {
+          // Ignore close errors on stale socket
+        }
+        break;
+      }
+    }
+
     const agent: ConnectedAgent = {
       ws,
       name: msg.name,

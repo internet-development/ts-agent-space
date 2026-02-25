@@ -117,6 +117,17 @@ export function wrapText(text: string, maxWidth: number): string[] {
   return lines;
 }
 
+//NOTE(jimmylee): Convert markdown formatting to ANSI escape codes
+function formatMarkdown(text: string): string {
+  return text
+    //NOTE(jimmylee): Bold: **text** → ANSI bold
+    .replace(/\*\*(.+?)\*\*/g, '\x1b[1m$1\x1b[22m')
+    //NOTE(jimmylee): Italic: *text* → ANSI italic
+    .replace(/\*(.+?)\*/g, '\x1b[3m$1\x1b[23m')
+    //NOTE(jimmylee): Inline code: `text` → ANSI dim
+    .replace(/`(.+?)`/g, '\x1b[2m$1\x1b[22m');
+}
+
 // ─── Agent Colors and Symbols ────────────────────────────────────────────────
 
 const AGENT_COLORS = [ANSI.cyan, ANSI.green, ANSI.yellow, ANSI.magenta, ANSI.brightBlue, ANSI.brightCyan, ANSI.brightGreen, ANSI.brightMagenta];
@@ -314,7 +325,7 @@ export class TerminalUI {
     const color = this.getAgentColor(agentName);
     const sym = this.getAgentSymbol(agentName);
     const name = `${color}${ANSI.bold}${agentName}${ANSI.reset}`;
-    this.writeOutput(`  ${ts}  ${color}${sym}${ANSI.reset} ${name}   ${ANSI.white}${message}${ANSI.reset}`);
+    this.writeOutput(`  ${ts}  ${color}${sym}${ANSI.reset} ${name}   ${ANSI.white}${formatMarkdown(message)}${ANSI.reset}`);
   }
 
   //NOTE(jimmylee): Log an agent joining the space
@@ -494,13 +505,6 @@ export class TerminalUI {
     this.inputBoxEnabled = true;
 
     //NOTE(jimmylee): Draw the input box at the bottom
-    this.redrawInputBox();
-
-    //NOTE(jimmylee): Draw top border of output frame (╔═══╗) into scroll region
-    const width = getTerminalWidth();
-    process.stdout.write(ANSI.saveCursor);
-    process.stdout.write(CSI.moveTo(scrollBottom, 1));
-    process.stdout.write('\n' + `${ANSI.white}${BOX.dTopLeft}${BOX.dHorizontal.repeat(width - 2)}${BOX.dTopRight}${ANSI.reset}`);
     this.redrawInputBox();
 
     //NOTE(jimmylee): Handle terminal resize — remove old handler to prevent listener leak
