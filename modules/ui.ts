@@ -1,6 +1,6 @@
 //NOTE(jimmylee): Terminal UI Module
-//NOTE(jimmylee): Uses scroll regions to anchor input box at bottom.
-//NOTE(jimmylee): Output scrolls in upper region, input stays fixed below.
+//NOTE(jimmylee): Writes output as normal text to stdout (scrollback-friendly).
+//NOTE(jimmylee): Input box is drawn below output and redrawn in-place using relative cursor moves.
 //NOTE(jimmylee): Adapted from ts-general-agent/modules/ui.ts for chatroom use.
 
 import type { AgentPresence } from '@common/types.js';
@@ -44,8 +44,6 @@ const CSI = {
   moveUp: (n: number) => `\x1b[${n}A`,
   moveDown: (n: number) => `\x1b[${n}B`,
   moveToColumn: (col: number) => `\x1b[${col}G`,
-  setScrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
-  resetScrollRegion: () => '\x1b[r',
   clearToEnd: '\x1b[J',
   clearLine: '\x1b[2K',
 };
@@ -151,17 +149,21 @@ function nameHash(name: string): number {
   return Math.abs(hash);
 }
 
-//NOTE(jimmylee): Terminal Ui with anchored input box
+//NOTE(jimmylee): Terminal UI — normal stdout output with a redrawn input box at the bottom
 export class TerminalUI {
   private thinkingMessage = '';
   private inputBoxEnabled = false;
-  private inputBoxHeight = 7; //NOTE(jimmylee): Minimum: 1 separator + 1 top border + 3 input lines + 1 bottom border + 0 agent lines (but minimum 7)
+  private inputBoxHeight = 7; //NOTE(jimmylee): 1 agent placeholder + 1 separator + INPUT_BOX_LINES
   private currentVersion = '0.0.0';
   private currentInputText = '';
   private currentCursorPos = 0;
   private connectedAgents: AgentPresence[] = [];
   private resizeHandler: (() => void) | null = null;
   private typingAgents: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  //NOTE(jimmylee): Tracks which line (0-indexed from top of input box) the cursor sits on.
+  //NOTE(jimmylee): Used by clearInputBoxArea() to navigate back to the top of the input box.
+  private inputBoxCursorLine = 0;
 
   //NOTE(jimmylee): Strip ANSI escape codes to get visible character count
   private visibleLength(str: string): number {
@@ -181,18 +183,116 @@ export class TerminalUI {
     return `${ANSI.white}${BOX.dVertical}${ANSI.reset}${text}${' '.repeat(padding)}${ANSI.white}${BOX.dVertical}${ANSI.reset}`;
   }
 
-  //NOTE(jimmylee): Write to the output area (scroll region)
+  //NOTE(jimmylee): Erase the current input box area using relative cursor moves.
+  //NOTE(jimmylee): Moves cursor to the top of the input box and clears everything below.
+  private clearInputBoxArea(): void {
+    if (this.inputBoxCursorLine > 0) {
+      process.stdout.write(CSI.moveUp(this.inputBoxCursorLine));
+    }
+    process.stdout.write(CSI.moveToColumn(1));
+    process.stdout.write(CSI.clearToEnd);
+  }
+
+  //NOTE(jimmylee): Draw the input box at the current cursor position (sequential writes).
+  //NOTE(jimmylee): Updates inputBoxCursorLine so clearInputBoxArea() can find it later.
+  private drawInputBoxHere(): void {
+    const width = getTerminalWidth();
+    const innerWidth = width - 4; //NOTE(jimmylee): │ + space + content + space + │
+
+    let lineCount = 0;
+
+    //NOTE(jimmylee): Draw connected agent lines
+    const agentsToShow = this.connectedAgents.slice(0, MAX_AGENTS_DISPLAYED);
+    if (agentsToShow.length > 0) {
+      for (const agent of agentsToShow) {
+        process.stdout.write(CSI.clearLine + this.addBorder(this.formatAgentLine(agent)) + '\n');
+        lineCount++;
+      }
+    } else {
+      //NOTE(jimmylee): Show placeholder when no agents connected
+      process.stdout.write(CSI.clearLine + this.addBorder(`  ${ANSI.dim}${SYM.ring} Waiting for agents...${ANSI.reset}`) + '\n');
+      lineCount++;
+    }
+
+    //NOTE(jimmylee): Separator line
+    process.stdout.write(CSI.clearLine + `${ANSI.white}${BOX.dBottomLeft}${BOX.dHorizontal.repeat(width - 2)}${BOX.dBottomRight}${ANSI.reset}` + '\n');
+    lineCount++;
+
+    //NOTE(jimmylee): Build input box top border
+    const statusTag = '[SPACE HOST]';
+    const statusColor = ANSI.cyan;
+    const hotkeys = `[ESC] CLEAR  [CTRL+C] QUIT  [ENTER] SEND`;
+    const topPadding = Math.max(0, width - statusTag.length - hotkeys.length - 8);
+    const topLine = `${ANSI.white}${BOX.topLeft}${BOX.horizontal}${ANSI.reset} ${statusColor}${statusTag}${ANSI.reset}  ${hotkeys} ${ANSI.white}${BOX.horizontal.repeat(topPadding + 1)}${BOX.topRight}${ANSI.reset}`;
+
+    process.stdout.write(CSI.clearLine + topLine + '\n');
+    lineCount++;
+
+    const inputStartLine = lineCount;
+
+    //NOTE(jimmylee): Hard-wrap text for predictable cursor positioning
+    const displayText = this.currentInputText || '';
+    const textLines: string[] = [];
+    if (displayText.length === 0) {
+      textLines.push('');
+    } else {
+      for (let i = 0; i < displayText.length; i += innerWidth) {
+        textLines.push(displayText.slice(i, i + innerWidth));
+      }
+    }
+
+    //NOTE(jimmylee): Calculate cursor position (trivial with hard-wrap)
+    const cursorLineIndex = innerWidth > 0 ? Math.floor(this.currentCursorPos / innerWidth) : 0;
+    const cursorColIndex = innerWidth > 0 ? this.currentCursorPos % innerWidth : 0;
+
+    //NOTE(jimmylee): Determine scroll window (keep cursor visible within 3 lines)
+    const VISIBLE_LINES = 3;
+    let displayStartLine = 0;
+    if (cursorLineIndex >= VISIBLE_LINES) {
+      displayStartLine = cursorLineIndex - (VISIBLE_LINES - 1);
+    }
+
+    //NOTE(jimmylee): Render 3 input lines
+    for (let i = 0; i < VISIBLE_LINES; i++) {
+      const lineIdx = displayStartLine + i;
+      const lineContent = (textLines[lineIdx] || '').padEnd(innerWidth);
+      process.stdout.write(CSI.clearLine + `${ANSI.white}${BOX.vertical}${ANSI.reset} ${ANSI.white}${lineContent}${ANSI.reset} ${ANSI.white}${BOX.vertical}${ANSI.reset}` + '\n');
+      lineCount++;
+    }
+
+    //NOTE(jimmylee): Bottom border (no trailing \n — cursor stays on this line)
+    const ver = `v${this.currentVersion}`;
+    const hasOverflow = textLines.length > displayStartLine + VISIBLE_LINES;
+    const scrollIndicator = hasOverflow ? ' ...' : '';
+    const bottomPadding = Math.max(0, width - ver.length - scrollIndicator.length - 5);
+    const bottomLine = `${BOX.bottomLeft}${BOX.horizontal.repeat(bottomPadding)}${scrollIndicator} ${ver} ${BOX.horizontal}${BOX.bottomRight}`;
+
+    process.stdout.write(CSI.clearLine + `${ANSI.white}${bottomLine}${ANSI.reset}`);
+    //NOTE(jimmylee): lineCount stays pointing at the bottom border line (0-indexed from top)
+
+    //NOTE(jimmylee): Position cursor in input field
+    const cursorVisibleRow = cursorLineIndex - displayStartLine;
+    const targetLine = inputStartLine + cursorVisibleRow; //NOTE(jimmylee): 0-indexed line within the input box
+    const linesToMoveUp = lineCount - targetLine;
+
+    if (linesToMoveUp > 0) {
+      process.stdout.write(CSI.moveUp(linesToMoveUp));
+    }
+
+    const cursorCol = Math.min(cursorColIndex, innerWidth) + 3; //NOTE(jimmylee): +3 for "│ " prefix
+    process.stdout.write(CSI.moveToColumn(Math.max(3, cursorCol)));
+
+    this.inputBoxCursorLine = targetLine;
+  }
+
+  //NOTE(jimmylee): Write a line to the output area.
+  //NOTE(jimmylee): When input box is active: erase it, write content, redraw it.
+  //NOTE(jimmylee): Terminal scrollback works naturally.
   private writeOutput(text: string): void {
     if (this.inputBoxEnabled) {
-      //NOTE(jimmylee): Save cursor, move to scroll region, write, restore
-      process.stdout.write(ANSI.saveCursor);
-      const height = getTerminalHeight();
-      const scrollBottom = height - this.inputBoxHeight;
-      //NOTE(jimmylee): Move to bottom of scroll region
-      process.stdout.write(CSI.moveTo(scrollBottom, 1));
-      process.stdout.write('\n' + this.addBorder(text));
-      //NOTE(jimmylee): Restore and redraw input box
-      this.redrawInputBox();
+      this.clearInputBoxArea();
+      process.stdout.write(this.addBorder(text) + '\n');
+      this.drawInputBoxHere();
     } else {
       process.stdout.write(text + '\n');
     }
@@ -354,10 +454,6 @@ export class TerminalUI {
     this.inputBoxHeight = Math.max(newHeight, minHeight);
 
     if (this.inputBoxEnabled) {
-      //NOTE(jimmylee): Update scroll region for new height
-      const height = getTerminalHeight();
-      const scrollBottom = height - this.inputBoxHeight;
-      process.stdout.write(CSI.setScrollRegion(1, scrollBottom));
       this.redrawInputBox();
     }
   }
@@ -382,7 +478,7 @@ export class TerminalUI {
     return `  ${color}${sym}${ANSI.reset} ${color}${ANSI.bold}${agent.name}${ANSI.reset}${typingTag}${' '.repeat(gap)}${ANSI.dim}${ver}${ANSI.reset}`;
   }
 
-  //NOTE(jimmylee): Header
+  //NOTE(jimmylee): Header — complete self-contained banner box
   printHeader(name: string, subtitle?: string): void {
     const width = getTerminalWidth();
     const innerWidth = width - 2;
@@ -482,140 +578,38 @@ export class TerminalUI {
     process.stdout.write('\r' + ANSI.clearLine);
   }
 
-  //NOTE(jimmylee): Anchored Input Box using scroll regions
-
-  //NOTE(jimmylee): Setup scroll region and draw initial input box
+  //NOTE(jimmylee): Initialize the input box — no scroll regions, just draw it below current output
   initInputBox(version: string = '0.0.0'): void {
     this.currentVersion = version;
     this.currentInputText = '';
     this.currentCursorPos = 0;
-
-    const height = getTerminalHeight();
-    const scrollBottom = height - this.inputBoxHeight;
-
-    //NOTE(jimmylee): Clear screen and set up scroll region
-    process.stdout.write(CSI.moveTo(1, 1));
-
-    //NOTE(jimmylee): Set scroll region (top of screen to above input box)
-    process.stdout.write(CSI.setScrollRegion(1, scrollBottom));
-
-    //NOTE(jimmylee): Move cursor to top of scroll region
-    process.stdout.write(CSI.moveTo(1, 1));
-
+    this.inputBoxCursorLine = 0;
     this.inputBoxEnabled = true;
 
-    //NOTE(jimmylee): Draw the input box at the bottom
-    this.redrawInputBox();
+    //NOTE(jimmylee): Top border of the chat area (content frame)
+    const width = getTerminalWidth();
+    process.stdout.write(`${ANSI.white}${BOX.dTopLeft}${BOX.dHorizontal.repeat(width - 2)}${BOX.dTopRight}${ANSI.reset}\n`);
 
-    //NOTE(jimmylee): Handle terminal resize — remove old handler to prevent listener leak
+    //NOTE(jimmylee): Draw the initial input box at the current cursor position
+    this.drawInputBoxHere();
+
+    //NOTE(jimmylee): Handle terminal resize — redraw input box for new width
     if (this.resizeHandler) {
       process.stdout.removeListener('resize', this.resizeHandler);
     }
     this.resizeHandler = () => {
       if (this.inputBoxEnabled) {
-        const newHeight = getTerminalHeight();
-        const newScrollBottom = newHeight - this.inputBoxHeight;
-        process.stdout.write(CSI.setScrollRegion(1, newScrollBottom));
         this.redrawInputBox();
       }
     };
     process.stdout.on('resize', this.resizeHandler);
   }
 
-  //NOTE(jimmylee): Redraw the input box at fixed bottom position (full width)
+  //NOTE(jimmylee): Redraw the input box in-place (erase + redraw)
   private redrawInputBox(): void {
     if (!this.inputBoxEnabled) return;
-
-    const height = getTerminalHeight();
-    const width = getTerminalWidth();
-    const innerWidth = width - 4; //NOTE(jimmylee): Account for borders and padding (│ + space + space + │)
-
-    //NOTE(jimmylee): Save cursor position in scroll region
-    process.stdout.write(ANSI.saveCursor);
-
-    //NOTE(jimmylee): Draw at fixed bottom position (outside scroll region)
-    const boxStartRow = height - this.inputBoxHeight + 1;
-    let currentRow = boxStartRow;
-
-    //NOTE(jimmylee): Draw connected agent lines
-    const agentsToShow = this.connectedAgents.slice(0, MAX_AGENTS_DISPLAYED);
-    if (agentsToShow.length > 0) {
-      for (const agent of agentsToShow) {
-        process.stdout.write(CSI.moveTo(currentRow, 1));
-        process.stdout.write(CSI.clearLine + this.addBorder(this.formatAgentLine(agent)));
-        currentRow++;
-      }
-    } else {
-      //NOTE(jimmylee): Show placeholder when no agents connected
-      process.stdout.write(CSI.moveTo(currentRow, 1));
-      process.stdout.write(CSI.clearLine + this.addBorder(`  ${ANSI.dim}${SYM.ring} Waiting for agents...${ANSI.reset}`));
-      currentRow++;
-    }
-
-    //NOTE(jimmylee): Separator line — matches header's double-border style
-    process.stdout.write(CSI.moveTo(currentRow, 1));
-    process.stdout.write(CSI.clearLine + `${ANSI.white}${BOX.dBottomLeft}${BOX.dHorizontal.repeat(width - 2)}${BOX.dBottomRight}${ANSI.reset}`);
-    currentRow++;
-
-    //NOTE(jimmylee): Build the input box lines
-    const statusTag = '[SPACE HOST]';
-    const statusColor = ANSI.cyan;
-    const hotkeys = `[ESC] CLEAR  [CTRL+C] QUIT  [ENTER] SEND`;
-    const topPadding = Math.max(0, width - statusTag.length - hotkeys.length - 8);
-    const topLine = `${ANSI.white}${BOX.topLeft}${BOX.horizontal}${ANSI.reset} ${statusColor}${statusTag}${ANSI.reset}  ${hotkeys} ${ANSI.white}${BOX.horizontal.repeat(topPadding + 1)}${BOX.topRight}${ANSI.reset}`;
-
-    const displayText = this.currentInputText || '';
-
-    //NOTE(jimmylee): Hard-wrap text for predictable cursor positioning
-    const textLines: string[] = [];
-    if (displayText.length === 0) {
-      textLines.push('');
-    } else {
-      for (let i = 0; i < displayText.length; i += innerWidth) {
-        textLines.push(displayText.slice(i, i + innerWidth));
-      }
-    }
-
-    //NOTE(jimmylee): Calculate cursor position (trivial with hard-wrap)
-    const cursorLineIndex = innerWidth > 0 ? Math.floor(this.currentCursorPos / innerWidth) : 0;
-    const cursorColIndex = innerWidth > 0 ? this.currentCursorPos % innerWidth : 0;
-
-    //NOTE(jimmylee): Determine scroll window (keep cursor visible within 3 lines)
-    const VISIBLE_LINES = 3;
-    let displayStartLine = 0;
-    if (cursorLineIndex >= VISIBLE_LINES) {
-      displayStartLine = cursorLineIndex - (VISIBLE_LINES - 1);
-    }
-
-    const ver = `v${this.currentVersion}`;
-    const hasOverflow = textLines.length > displayStartLine + VISIBLE_LINES;
-    const scrollIndicator = hasOverflow ? ' ...' : '';
-    const bottomPadding = Math.max(0, width - ver.length - scrollIndicator.length - 5);
-    const bottomLine = `${BOX.bottomLeft}${BOX.horizontal.repeat(bottomPadding)}${scrollIndicator} ${ver} ${BOX.horizontal}${BOX.bottomRight}`;
-
-    //NOTE(jimmylee): Draw input box — top border
-    process.stdout.write(CSI.moveTo(currentRow, 1));
-    process.stdout.write(CSI.clearLine + topLine);
-    currentRow++;
-
-    //NOTE(jimmylee): Render 3 input lines
-    for (let i = 0; i < VISIBLE_LINES; i++) {
-      const lineIdx = displayStartLine + i;
-      const lineContent = (textLines[lineIdx] || '').padEnd(innerWidth);
-      process.stdout.write(CSI.moveTo(currentRow, 1));
-      process.stdout.write(CSI.clearLine + `${ANSI.white}${BOX.vertical}${ANSI.reset} ${ANSI.white}${lineContent}${ANSI.reset} ${ANSI.white}${BOX.vertical}${ANSI.reset}`);
-      currentRow++;
-    }
-
-    //NOTE(jimmylee): Bottom border
-    process.stdout.write(CSI.moveTo(currentRow, 1));
-    process.stdout.write(CSI.clearLine + `${ANSI.white}${bottomLine}${ANSI.reset}`);
-
-    //NOTE(jimmylee): Position cursor on the correct visible row
-    const cursorVisibleRow = cursorLineIndex - displayStartLine;
-    const inputLineRow = currentRow - VISIBLE_LINES + cursorVisibleRow;
-    const cursorCol = Math.min(cursorColIndex, innerWidth) + 3; //NOTE(jimmylee): +3 for "│ " prefix
-    process.stdout.write(CSI.moveTo(inputLineRow, Math.max(3, cursorCol)));
+    this.clearInputBoxArea();
+    this.drawInputBoxHere();
   }
 
   //NOTE(jimmylee): Update input box content
@@ -631,26 +625,17 @@ export class TerminalUI {
     this.printInputBox('', 0, version);
   }
 
-  //NOTE(jimmylee): Disable input box and restore normal scrolling
+  //NOTE(jimmylee): Disable input box and clean up
   finalizeInputBox(): void {
     if (!this.inputBoxEnabled) return;
 
-    //NOTE(jimmylee): Reset scroll region to full screen
-    process.stdout.write(CSI.resetScrollRegion());
-
-    //NOTE(jimmylee): Move to bottom and clear input box area
-    const height = getTerminalHeight();
-    process.stdout.write(CSI.moveTo(height - this.inputBoxHeight + 1, 1));
-    for (let i = 0; i < this.inputBoxHeight; i++) {
-      process.stdout.write(CSI.clearLine + '\n');
-    }
-
-    //NOTE(jimmylee): Move back up
-    process.stdout.write(CSI.moveTo(height - this.inputBoxHeight + 1, 1));
+    //NOTE(jimmylee): Erase the input box area
+    this.clearInputBoxArea();
 
     this.inputBoxEnabled = false;
     this.currentInputText = '';
     this.currentCursorPos = 0;
+    this.inputBoxCursorLine = 0;
   }
 }
 

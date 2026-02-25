@@ -34,7 +34,6 @@ async function main(): Promise<void> {
 
   //NOTE(jimmylee): Display welcome
   ui.printHeader(SPACE_NAME, 'AGENT SPACE');
-  ui.printDivider('light');
 
   //NOTE(jimmylee): Initialize the input box
   ui.initInputBox(VERSION);
