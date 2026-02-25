@@ -24,24 +24,55 @@ export class ChatPersistence {
   }
 
   //NOTE(jimmylee): Read the last N entries for history replay
+  //NOTE(jimmylee): Uses reverse chunk-reading so we only touch the tail of the file, not the whole thing
   getRecentHistory(limit: number = HISTORY_REPLAY_LIMIT): ChatLogEntry[] {
     if (!fs.existsSync(this.filePath)) return [];
 
-    const content = fs.readFileSync(this.filePath, 'utf8').trim();
-    if (!content) return [];
+    const stat = fs.statSync(this.filePath);
+    if (stat.size === 0) return [];
 
-    const lines = content.split('\n');
-    const recent = lines.slice(-limit);
+    const fd = fs.openSync(this.filePath, 'r');
+    try {
+      const lines: string[] = [];
+      const CHUNK_SIZE = 8192;
+      let position = stat.size;
+      let trailing = '';
 
-    const entries: ChatLogEntry[] = [];
-    for (const line of recent) {
-      try {
-        entries.push(JSON.parse(line) as ChatLogEntry);
-      } catch {
-        // Skip malformed lines
+      //NOTE(jimmylee): Read backwards in chunks until we have enough lines
+      while (position > 0 && lines.length < limit) {
+        const readSize = Math.min(CHUNK_SIZE, position);
+        position -= readSize;
+        const buf = Buffer.alloc(readSize);
+        fs.readSync(fd, buf, 0, readSize, position);
+        const chunk = buf.toString('utf8') + trailing;
+        const parts = chunk.split('\n');
+        //NOTE(jimmylee): First element is partial (or empty if chunk starts at line boundary)
+        trailing = parts[0];
+        //NOTE(jimmylee): Remaining parts are complete lines — prepend in reverse order
+        for (let i = parts.length - 1; i >= 1; i--) {
+          if (parts[i]) lines.unshift(parts[i]);
+          if (lines.length >= limit) break;
+        }
       }
+
+      //NOTE(jimmylee): Include any remaining trailing content as the first line
+      if (trailing && lines.length < limit) {
+        lines.unshift(trailing);
+      }
+
+      const recent = lines.slice(-limit);
+      const entries: ChatLogEntry[] = [];
+      for (const line of recent) {
+        try {
+          entries.push(JSON.parse(line) as ChatLogEntry);
+        } catch {
+          // Skip malformed lines
+        }
+      }
+      return entries;
+    } finally {
+      fs.closeSync(fd);
     }
-    return entries;
   }
 
   //NOTE(jimmylee): Get entries since a given timestamp, up to limit

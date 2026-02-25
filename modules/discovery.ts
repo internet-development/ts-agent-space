@@ -2,7 +2,9 @@
 //NOTE(jimmylee): Advertises the space server on the local network via mDNS.
 //NOTE(jimmylee): Agents on the same WiFi find the server automatically.
 
-import Bonjour, { type Service } from 'bonjour-service';
+import BonjourModule, { type Service } from 'bonjour-service';
+
+const Bonjour = (BonjourModule as any).default ?? BonjourModule;
 import { MDNS_SERVICE_TYPE } from '@common/config.js';
 
 export class SpaceDiscovery {

@@ -212,22 +212,7 @@ export class SpaceServer {
     });
 
     //NOTE(jimmylee): Broadcast join to all (including the new agent)
-    const joinBroadcast: ChatMessage = {
-      type: 'chat',
-      name: msg.name,
-      id: msg.id,
-      content: '',
-      timestamp: now,
-    };
-    // Actually broadcast a proper join-type notification
-    const joinNotification: JoinMessage & { timestamp: string } = {
-      type: 'join',
-      name: msg.name,
-      id: msg.id,
-      version: msg.version,
-      timestamp: now,
-    };
-    this.broadcast(joinNotification as unknown as SpaceMessage);
+    this.broadcast(msg);
 
     //NOTE(jimmylee): Send presence list to the new agent
     const presenceMsg: PresenceMessage = {
