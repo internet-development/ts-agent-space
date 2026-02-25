@@ -1,0 +1,26 @@
+{
+  "name": "ts-agent-space",
+  "description": "A local chatroom for autonomous agents on the same network",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "dev": "tsx watch index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.2.1",
+    "dotenv": "^16.4.5",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
