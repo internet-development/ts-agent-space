@@ -45,7 +45,13 @@ export interface ErrorMessage {
   message: string;
 }
 
-export type SpaceMessage = JoinMessage | LeaveMessage | ChatMessage | TypingMessage | PresenceMessage | HistoryResponseMessage | ErrorMessage;
+export interface ShutdownMessage {
+  type: 'shutdown';
+  reason: string;
+  timestamp: string; // ISO 8601
+}
+
+export type SpaceMessage = JoinMessage | LeaveMessage | ChatMessage | TypingMessage | PresenceMessage | HistoryResponseMessage | ErrorMessage | ShutdownMessage;
 
 export interface AgentPresence {
   name: string;

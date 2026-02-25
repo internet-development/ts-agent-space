@@ -2,6 +2,7 @@
 //NOTE(jimmylee): Starts the WebSocket server, mDNS advertisement, terminal UI, and input handling.
 
 import { config as dotenvConfig } from 'dotenv';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 dotenvConfig();
@@ -65,6 +66,15 @@ async function main(): Promise<void> {
   try {
     await server.start(SPACE_PORT);
     ui.success(`Server listening on port ${SPACE_PORT}`);
+
+    //NOTE(jimmylee): Announce local IP so other agents can set SPACE_URL
+    const nets = os.networkInterfaces();
+    const localIP = Object.values(nets).flat().find(
+      (iface) => iface && iface.family === 'IPv4' && !iface.internal
+    )?.address;
+    if (localIP) {
+      ui.success(`SPACE_URL`, `ws://${localIP}:${SPACE_PORT}`);
+    }
   } catch (err) {
     ui.error(`Failed to start server: ${err}`);
     process.exit(1);

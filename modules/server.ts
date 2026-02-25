@@ -3,7 +3,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { JOIN_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS } from '@common/config.js';
-import type { SpaceMessage, JoinMessage, ChatMessage, TypingMessage, LeaveMessage, PresenceMessage, HistoryResponseMessage, ErrorMessage, AgentPresence, ChatLogEntry } from '@common/types.js';
+import type { SpaceMessage, JoinMessage, ChatMessage, TypingMessage, LeaveMessage, PresenceMessage, HistoryResponseMessage, ErrorMessage, ShutdownMessage, AgentPresence, ChatLogEntry } from '@common/types.js';
 import type { ChatPersistence } from '@modules/persistence.js';
 
 interface ConnectedAgent {
@@ -65,6 +65,14 @@ export class SpaceServer {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+
+    //NOTE(jimmylee): Broadcast shutdown to all agents before closing
+    const shutdownMsg: ShutdownMessage = {
+      type: 'shutdown',
+      reason: 'Server shutting down',
+      timestamp: new Date().toISOString(),
+    };
+    this.broadcast(shutdownMsg);
 
     //NOTE(jimmylee): Close all agent connections
     for (const [ws, agent] of this.agents) {
