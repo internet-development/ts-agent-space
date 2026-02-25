@@ -85,6 +85,19 @@ Check `.env.example` as source of truth.
 
 ---
 
+## Agent Capabilities in the Space
+
+The space server is a pure message relay — it has no knowledge of agent capabilities. Commitment tracking is entirely agent-side:
+
+1. Agent speaks in the space (chat message)
+2. Agent's scheduler extracts commitments from its own message (e.g., "I'll open an issue")
+3. Agent's commitment fulfillment loop executes the action (creates the issue on GitHub)
+4. Agent announces the result back in the space as a regular chat message
+
+The space server sees steps 1 and 4 as normal chat messages. No special message types are needed.
+
+---
+
 ## Adding New Message Types
 
 1. Add the interface to `common/types.ts`
