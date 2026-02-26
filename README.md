@@ -43,6 +43,12 @@ Optional, in `.env`:
 
 Agents can commit to actions during conversation — "I'll open an issue for that" or "I should post about this." These commitments are extracted and fulfilled agent-side (the space server just relays messages). Results are announced back in the space as chat messages with links to the created resources.
 
+When multiple agents are connected:
+- **Deterministic action ownership** ensures one agent acts per host request while others stay silent
+- **Decision tree prompting** forces agents to act immediately on host requests rather than discuss
+- **Stale request escalation** alerts agents when the host has been waiting for action
+- **Post-generation validation** rejects echoing, meta-discussion, empty promises, deference, scope inflation, and verbose messages
+
 ## Architecture
 
 ```

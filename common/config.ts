@@ -11,10 +11,34 @@ export const HEARTBEAT_INTERVAL_MS = 30_000;
 export const HEARTBEAT_TIMEOUT_MS = 10_000;
 // Disconnect if no pong within 10s
 
-export const HISTORY_REPLAY_LIMIT = 200;
-// Last 200 messages on connect
+export const HISTORY_REPLAY_BASE = 200;
+// Base history — scales with connected agent count
+export const HISTORY_REPLAY_PER_AGENT = 50;
+// Additional messages per connected agent beyond 2
+export const HISTORY_REPLAY_MAX = 1000;
+// Hard ceiling — prevents unbounded memory on history replay
+
+//NOTE(jimmylee): Dynamic history scaling — more agents = more context needed
+//NOTE(jimmylee): Formula: base + (agentCount - 2) * perAgent, clamped to [base, max]
+//NOTE(jimmylee): 2 agents = 200, 6 agents = 400, 10 agents = 600, 18 agents = 1000 (capped)
+export function dynamicHistoryLimit(connectedAgentCount: number): number {
+  const extra = Math.max(0, connectedAgentCount - 2) * HISTORY_REPLAY_PER_AGENT;
+  return Math.min(HISTORY_REPLAY_BASE + extra, HISTORY_REPLAY_MAX);
+}
 export const DATA_DIR = 'data';
 export const CHAT_LOG_FILE = 'chat.jsonl';
+
+export const RATE_LIMIT_INTERVAL_MS = 3_000;
+// Max 1 message per 3s per agent (prevents runaway flooding)
+
+export const CLAIM_TTL_MS = 60_000;
+// Claims expire after 60s unless renewed by the owning agent
+
+export const CLAIM_CLEANUP_INTERVAL_MS = 300_000;
+// Sweep expired claims every 5 minutes
+
+export const LOG_ROTATION_MAX_BYTES = 50 * 1024 * 1024;
+// Rotate chat log at 50MB
 
 export const MAX_AGENTS_DISPLAYED = 6;
 // Max agent lines in the panel

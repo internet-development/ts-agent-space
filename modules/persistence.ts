@@ -3,7 +3,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { DATA_DIR, CHAT_LOG_FILE, HISTORY_REPLAY_LIMIT } from '@common/config.js';
+import { DATA_DIR, CHAT_LOG_FILE, HISTORY_REPLAY_BASE, LOG_ROTATION_MAX_BYTES } from '@common/config.js';
 import type { ChatLogEntry } from '@common/types.js';
 
 export class ChatPersistence {
@@ -18,14 +18,32 @@ export class ChatPersistence {
   }
 
   //NOTE(jimmylee): Append a single entry to the JSONL log
+  //NOTE(jimmylee): Checks file size and rotates if above threshold
   append(entry: ChatLogEntry): void {
     const line = JSON.stringify(entry) + '\n';
     fs.appendFileSync(this.filePath, line, 'utf8');
+    this.maybeRotate();
+  }
+
+  //NOTE(jimmylee): Rotate the log file when it exceeds LOG_ROTATION_MAX_BYTES
+  //NOTE(jimmylee): Renames current log to chat.1.jsonl (overwrites previous rotation)
+  //NOTE(jimmylee): History replay only reads the tail, so rotation is transparent to clients
+  private maybeRotate(): void {
+    try {
+      if (!fs.existsSync(this.filePath)) return;
+      const stat = fs.statSync(this.filePath);
+      if (stat.size <= LOG_ROTATION_MAX_BYTES) return;
+
+      const rotatedPath = this.filePath.replace(/\.jsonl$/, '.1.jsonl');
+      fs.renameSync(this.filePath, rotatedPath);
+    } catch {
+      // Rotation failure is non-fatal — next append creates a fresh file
+    }
   }
 
   //NOTE(jimmylee): Read the last N entries for history replay
   //NOTE(jimmylee): Uses reverse chunk-reading so we only touch the tail of the file, not the whole thing
-  getRecentHistory(limit: number = HISTORY_REPLAY_LIMIT): ChatLogEntry[] {
+  getRecentHistory(limit: number = HISTORY_REPLAY_BASE): ChatLogEntry[] {
     if (!fs.existsSync(this.filePath)) return [];
 
     const stat = fs.statSync(this.filePath);
@@ -76,7 +94,7 @@ export class ChatPersistence {
   }
 
   //NOTE(jimmylee): Get entries since a given timestamp, up to limit
-  getSince(timestamp: string, limit: number = HISTORY_REPLAY_LIMIT): ChatLogEntry[] {
+  getSince(timestamp: string, limit: number = HISTORY_REPLAY_BASE): ChatLogEntry[] {
     const all = this.getRecentHistory(limit * 2); // Read a wider window
     const since = new Date(timestamp).getTime();
     return all.filter((e) => new Date(e.timestamp).getTime() > since).slice(-limit);
