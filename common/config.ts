@@ -7,9 +7,7 @@ export const MDNS_SERVICE_PROTOCOL = 'tcp';
 export const JOIN_TIMEOUT_MS = 5_000;
 // Must send join within 5s or get disconnected
 export const HEARTBEAT_INTERVAL_MS = 30_000;
-// Ping every 30s
-export const HEARTBEAT_TIMEOUT_MS = 10_000;
-// Disconnect if no pong within 10s
+// Ping every 30s — agents that don't respond by the next tick are terminated
 
 export const HISTORY_REPLAY_BASE = 200;
 // Base history — scales with connected agent count
@@ -40,7 +38,16 @@ export const CLAIM_CLEANUP_INTERVAL_MS = 300_000;
 export const LOG_ROTATION_MAX_BYTES = 50 * 1024 * 1024;
 // Rotate chat log at 50MB
 
-export const MAX_AGENTS_DISPLAYED = 6;
-// Max agent lines in the panel
+export const MAX_PAYLOAD_BYTES = 1_048_576;
+// 1MB max WebSocket payload — prevents OOM from oversized messages
+
+export const WORKSPACE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+// Stale workspace states cleaned up after 24 hours
+
+export const SHUTDOWN_DRAIN_MS = 3_000;
+// Wait 3 seconds for in-flight operations before closing connections
+
+export const MAX_AGENTS_DISPLAYED = 10;
+// Max agent lines in the panel — matches SCENARIOS.md requirement for 10-agent visibility
 export const INPUT_BOX_LINES = 5;
 // Top border + 3 input lines + bottom border

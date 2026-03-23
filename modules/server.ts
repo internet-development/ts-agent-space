@@ -2,7 +2,7 @@
 //NOTE(jimmylee): Manages agent connections, broadcasts, heartbeat, and lifecycle.
 
 import { WebSocketServer, WebSocket } from 'ws';
-import { JOIN_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS, RATE_LIMIT_INTERVAL_MS, CLAIM_TTL_MS, CLAIM_CLEANUP_INTERVAL_MS, dynamicHistoryLimit } from '@common/config.js';
+import { JOIN_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS, RATE_LIMIT_INTERVAL_MS, CLAIM_TTL_MS, CLAIM_CLEANUP_INTERVAL_MS, MAX_PAYLOAD_BYTES, WORKSPACE_STATE_TTL_MS, dynamicHistoryLimit } from '@common/config.js';
 import type { SpaceMessage, JoinMessage, ChatMessage, TypingMessage, LeaveMessage, PresenceMessage, HistoryResponseMessage, ErrorMessage, ShutdownMessage, IdentityMessage, ClaimMessage, StateMessage, ActionResultMessage, ReflectionMessage, WorkspaceStateMessage, AgentPresence, IdentitySummary, ChatLogEntry } from '@common/types.js';
 import type { ChatPersistence } from '@modules/persistence.js';
 
@@ -49,10 +49,19 @@ export class SpaceServer {
     this.hostId = 'host-' + Date.now().toString(36);
   }
 
+  //NOTE(jimmylee): Get the actual port the server is listening on (useful when started with port 0)
+  get port(): number | null {
+    if (!this.wss) return null;
+    const addr = this.wss.address();
+    if (typeof addr === 'object' && addr) return addr.port;
+    return null;
+  }
+
   //NOTE(jimmylee): Start the WebSocket server on the given port
   async start(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.wss = new WebSocketServer({ port });
+      //NOTE(jimmylee): Set maxPayload to prevent OOM from oversized messages
+      this.wss = new WebSocketServer({ port, maxPayload: MAX_PAYLOAD_BYTES });
 
       this.wss.on('listening', () => {
         this.startHeartbeat();
@@ -70,6 +79,17 @@ export class SpaceServer {
     });
   }
 
+  //NOTE(jimmylee): Broadcast shutdown message WITHOUT closing connections
+  //NOTE(jimmylee): Allows agents to finish in-flight work during the drain period
+  broadcastShutdown(): void {
+    const shutdownMsg: ShutdownMessage = {
+      type: 'shutdown',
+      reason: 'Server shutting down',
+      timestamp: new Date().toISOString(),
+    };
+    this.broadcast(shutdownMsg);
+  }
+
   //NOTE(jimmylee): Stop the server and clean up
   stop(): void {
     if (this.heartbeatTimer) {
@@ -81,15 +101,7 @@ export class SpaceServer {
       this.claimCleanupTimer = null;
     }
 
-    //NOTE(jimmylee): Broadcast shutdown to all agents before closing
-    const shutdownMsg: ShutdownMessage = {
-      type: 'shutdown',
-      reason: 'Server shutting down',
-      timestamp: new Date().toISOString(),
-    };
-    this.broadcast(shutdownMsg);
-
-    //NOTE(jimmylee): Close all agent connections
+    //NOTE(jimmylee): Close all agent connections (shutdown already broadcast via broadcastShutdown)
     for (const [ws, agent] of this.agents) {
       try {
         ws.close(1001, 'Server shutting down');
@@ -146,9 +158,14 @@ export class SpaceServer {
       }
     }
     //NOTE(jimmylee): Also match bare agent names (no @ prefix) for natural addressing
+    //NOTE(jimmylee): Uses word boundary regex to prevent substring false positives (e.g. "Bob" matching "bobsled")
     for (const agent of this.agents.values()) {
-      if (content.toLowerCase().includes(agent.name.toLowerCase()) && !addressed.includes(agent.name)) {
-        addressed.push(agent.name);
+      if (!addressed.includes(agent.name)) {
+        const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const bareNamePattern = new RegExp('\\b' + escaped + '\\b', 'i');
+        if (bareNamePattern.test(content)) {
+          addressed.push(agent.name);
+        }
       }
     }
     return addressed;
@@ -156,6 +173,10 @@ export class SpaceServer {
 
   //NOTE(jimmylee): Broadcast a chat message from the host (owner input)
   broadcastFromHost(content: string): void {
+    if (content.length > 100_000) {
+      console.error(`[host] Message truncated from ${content.length} to 100000 chars`);
+      content = content.slice(0, 100_000);
+    }
     const now = new Date().toISOString();
     const addressed = this.parseAddressed(content);
     const chatMsg: ChatMessage = {
@@ -206,9 +227,16 @@ export class SpaceServer {
       this.handleDisconnect(ws);
     });
 
-    ws.on('error', () => {
+    ws.on('error', (err) => {
+      //NOTE(jimmylee): Log the error for production debugging — connection failures, protocol violations, etc.
+      //NOTE(jimmylee): Don't call handleDisconnect here — the 'close' event always fires after 'error'
+      //NOTE(jimmylee): and will handle cleanup. Calling it twice would be a no-op but is wasteful.
+      const agent = this.agents.get(ws);
+      const agentLabel = agent ? agent.name : 'unknown';
+      try {
+        console.error(`[ws error] agent=${agentLabel} error=${String(err)}`);
+      } catch {}
       clearTimeout(joinTimeout);
-      this.handleDisconnect(ws);
     });
 
     ws.on('pong', () => {
@@ -271,12 +299,13 @@ export class SpaceServer {
     const now = new Date().toISOString();
 
     //NOTE(jimmylee): Validate required join fields — reject malformed joins before registering
-    if (!msg.name || typeof msg.name !== 'string' || msg.name.trim().length === 0 ||
-        !msg.id || typeof msg.id !== 'string' || msg.id.trim().length === 0 ||
-        !msg.version || typeof msg.version !== 'string') {
+    //NOTE(jimmylee): Length bounds prevent memory exhaustion from oversized fields stored in presence
+    if (!msg.name || typeof msg.name !== 'string' || msg.name.trim().length === 0 || msg.name.length > 100 ||
+        !msg.id || typeof msg.id !== 'string' || msg.id.trim().length === 0 || msg.id.length > 100 ||
+        !msg.version || typeof msg.version !== 'string' || msg.version.length > 50) {
       const errorMsg: ErrorMessage = {
         type: 'error',
-        message: 'Invalid join: name, id, and version are required non-empty strings',
+        message: 'Invalid join: name (1-100 chars), id (1-100 chars), and version (1-50 chars) are required',
       };
       ws.send(JSON.stringify(errorMsg));
       ws.close(4003, 'Invalid join message');
@@ -287,10 +316,11 @@ export class SpaceServer {
     if (this.agents.has(ws)) return;
 
     //NOTE(jimmylee): Dedup by agent name — if an agent with the same name already exists,
-    //NOTE(jimmylee): close the stale connection before registering the new one
+    //NOTE(jimmylee): run full disconnect cleanup before registering the new one
     for (const [existingWs, existingAgent] of this.agents) {
       if (existingAgent.name === msg.name) {
-        this.agents.delete(existingWs);
+        //NOTE(jimmylee): Full cleanup: broadcast leave, clean up claims/states, persist event
+        this.handleDisconnect(existingWs);
         try {
           existingWs.close(4002, 'Replaced by new connection');
         } catch {
@@ -308,7 +338,7 @@ export class SpaceServer {
       joinedAt: now,
       lastSeen: now,
       alive: true,
-      capabilities: msg.capabilities,
+      capabilities: Array.isArray(msg.capabilities) ? msg.capabilities.filter((c: unknown) => typeof c === 'string') : undefined,
       lastMessageAt: 0,
     };
 
@@ -323,15 +353,29 @@ export class SpaceServer {
       content: '',
     });
 
-    //NOTE(jimmylee): Broadcast join to all (including the new agent)
-    this.broadcast(msg);
+    //NOTE(jimmylee): Broadcast normalized join to all (including the new agent)
+    //NOTE(jimmylee): Construct a clean message from validated fields — prevents extra client fields from leaking
+    const joinBroadcast: JoinMessage = {
+      type: 'join',
+      name: msg.name,
+      id: msg.id,
+      version: msg.version,
+      ...(agent.capabilities ? { capabilities: agent.capabilities } : {}),
+    };
+    this.broadcast(joinBroadcast);
 
     //NOTE(jimmylee): Send presence list to the new agent
+    //NOTE(jimmylee): Wrapped in try/catch — agent may disconnect between join and these sends
     const presenceMsg: PresenceMessage = {
       type: 'presence',
       agents: this.getConnectedAgents(),
     };
-    ws.send(JSON.stringify(presenceMsg));
+    try {
+      ws.send(JSON.stringify(presenceMsg));
+    } catch {
+      //NOTE(jimmylee): Agent disconnected between join and presence send — close event will clean up
+      return;
+    }
 
     //NOTE(jimmylee): Send history to the new agent — limit scales with connected agent count
     //NOTE(jimmylee): More agents = more context needed to understand the conversation
@@ -341,7 +385,21 @@ export class SpaceServer {
       type: 'history_response',
       entries: history,
     };
-    ws.send(JSON.stringify(historyMsg));
+    try {
+      ws.send(JSON.stringify(historyMsg));
+    } catch {
+      //NOTE(jimmylee): Agent disconnected between join and history send — close event will clean up
+    }
+
+    //NOTE(jimmylee): Send cached workspace states to the new agent so it has full context
+    for (const [, wsState] of this.workspaceStates) {
+      try {
+        ws.send(JSON.stringify(wsState));
+      } catch {
+        //NOTE(jimmylee): Agent disconnected — close event will clean up
+        break;
+      }
+    }
 
     //NOTE(jimmylee): Notify callbacks
     this.callbacks.onJoin?.({
@@ -373,6 +431,13 @@ export class SpaceServer {
       return;
     }
 
+    //NOTE(jimmylee): Reject oversized messages to prevent memory exhaustion during broadcast/persist
+    if (msg.content.length > 100_000) {
+      const errorMsg: ErrorMessage = { type: 'error', message: 'Invalid chat: content exceeds 100KB limit' };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
+
     //NOTE(jimmylee): Rate limiting — max 1 message per RATE_LIMIT_INTERVAL_MS per agent
     const nowMs = Date.now();
     if (nowMs - agent.lastMessageAt < RATE_LIMIT_INTERVAL_MS) {
@@ -384,6 +449,7 @@ export class SpaceServer {
 
     const now = new Date(nowMs).toISOString();
     agent.lastSeen = now;
+    agent.alive = true;
 
     //NOTE(jimmylee): Normalize the message with server timestamp
     //NOTE(jimmylee): Relay threadId transparently — server doesn't interpret it, agents partition context
@@ -433,9 +499,17 @@ export class SpaceServer {
     const agent = this.agents.get(ws);
     if (!agent) return;
 
+    //NOTE(jimmylee): Validate identity summary — reject malformed data before storing and broadcasting
+    if (!msg.summary || typeof msg.summary !== 'object') {
+      const errorMsg: ErrorMessage = { type: 'error', message: 'Invalid identity: summary must be an object' };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
+
     //NOTE(jimmylee): Store the identity summary on the connected agent
     agent.identity = msg.summary;
     agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
 
     //NOTE(jimmylee): Normalize with server-side agent info
     const identityMsg: IdentityMessage = {
@@ -451,7 +525,7 @@ export class SpaceServer {
       timestamp: identityMsg.timestamp,
       agentName: agent.name,
       agentId: agent.id,
-      type: 'join', // Reuse join type for persistence — identity is a join enrichment
+      type: 'identity',
       content: JSON.stringify(msg.summary),
     });
 
@@ -481,6 +555,7 @@ export class SpaceServer {
     }
 
     agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
     const now = Date.now();
     const claimKey = `${msg.action}:${msg.target}`;
 
@@ -493,13 +568,19 @@ export class SpaceServer {
       return;
     }
 
-    //NOTE(jimmylee): Conflict detection — check if another agent already claimed this action:target within 60s
-    if (existing && existing.name !== agent.name && now - existing.timestamp < CLAIM_TTL_MS) {
+    //NOTE(jimmylee): Lazy eviction — if existing claim has expired, delete it before conflict check
+    //NOTE(jimmylee): Prevents expired entries from accumulating between 5-minute cleanup sweeps
+    if (existing && now - existing.timestamp >= CLAIM_TTL_MS) {
+      this.activeClaims.delete(claimKey);
+    } else if (existing && existing.name !== agent.name) {
+      //NOTE(jimmylee): Conflict detection — another agent already claimed this action:target within TTL
+      //NOTE(jimmylee): Return immediately so the conflicting claim is NOT tracked or broadcast
       const errorMsg: ErrorMessage = {
         type: 'error',
         message: `Claim conflict — ${existing.name} and ${agent.name} both claimed ${msg.target}. ${existing.name} claimed first.`,
       };
       ws.send(JSON.stringify(errorMsg));
+      return;
     }
 
     //NOTE(jimmylee): Track the new claim
@@ -533,10 +614,21 @@ export class SpaceServer {
     const agent = this.agents.get(ws);
     if (!agent) return;
 
+    //NOTE(jimmylee): Validate state field — must be one of the allowed operational states
+    const validStates = new Set(['idle', 'thinking', 'acting', 'blocked']);
+    if (!msg.state || typeof msg.state !== 'string' || !validStates.has(msg.state)) {
+      const errorMsg: ErrorMessage = { type: 'error', message: `Invalid state: must be one of idle, thinking, acting, blocked (got ${JSON.stringify(msg.state)})` };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
+
     agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
 
     //NOTE(jimmylee): Store latest state for this agent
-    this.agentStates.set(agent.name, { state: msg.state, detail: msg.detail });
+    //NOTE(jimmylee): Truncate detail to prevent oversized state messages from accumulating in memory
+    const detail = typeof msg.detail === 'string' ? msg.detail.slice(0, 1000) : msg.detail;
+    this.agentStates.set(agent.name, { state: msg.state, detail });
 
     //NOTE(jimmylee): Normalize with server-side agent info
     const stateMsg: StateMessage = {
@@ -544,7 +636,7 @@ export class SpaceServer {
       name: agent.name,
       id: agent.id,
       state: msg.state,
-      detail: msg.detail,
+      detail,
       timestamp: new Date().toISOString(),
     };
 
@@ -566,7 +658,17 @@ export class SpaceServer {
     const agent = this.agents.get(ws);
     if (!agent) return;
 
+    //NOTE(jimmylee): Validate action result fields — reject malformed results before broadcasting
+    if (!msg.action || typeof msg.action !== 'string' || msg.action.trim().length === 0 ||
+        !msg.target || typeof msg.target !== 'string' || msg.target.trim().length === 0 ||
+        typeof msg.success !== 'boolean') {
+      const errorMsg: ErrorMessage = { type: 'error', message: 'Invalid action_result: action, target (non-empty strings) and success (boolean) are required' };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
+
     agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
 
     //NOTE(jimmylee): Clean up the corresponding active claim
     const claimKey = `${msg.action}:${msg.target}`;
@@ -580,8 +682,8 @@ export class SpaceServer {
       action: msg.action,
       target: msg.target,
       success: msg.success,
-      link: msg.link,
-      error: msg.error,
+      link: typeof msg.link === 'string' ? msg.link : undefined,
+      error: typeof msg.error === 'string' ? msg.error : undefined,
       timestamp: new Date().toISOString(),
     };
 
@@ -603,14 +705,25 @@ export class SpaceServer {
     const agent = this.agents.get(ws);
     if (!agent) return;
 
+    //NOTE(jimmylee): Validate reflection summary — must be a non-empty string, capped at 5000 chars
+    if (!msg.summary || typeof msg.summary !== 'string' || msg.summary.trim().length === 0) {
+      const errorMsg: ErrorMessage = { type: 'error', message: 'Invalid reflection: summary must be a non-empty string' };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
+
     agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
+
+    //NOTE(jimmylee): Truncate reflection summary to prevent oversized broadcasts
+    const summary = msg.summary.slice(0, 5000);
 
     //NOTE(jimmylee): Normalize with server-side agent info
     const reflectionMsg: ReflectionMessage = {
       type: 'reflection',
       name: agent.name,
       id: agent.id,
-      summary: msg.summary,
+      summary,
       timestamp: new Date().toISOString(),
     };
 
@@ -632,19 +745,28 @@ export class SpaceServer {
     const agent = this.agents.get(ws);
     if (!agent) return;
 
-    agent.lastSeen = new Date().toISOString();
+    //NOTE(jimmylee): Validate workspace state fields — reject malformed data before storing and broadcasting
+    if (!msg.workspace || typeof msg.workspace !== 'string' || msg.workspace.trim().length === 0 ||
+        typeof msg.totalTasks !== 'number' || typeof msg.completedTasks !== 'number') {
+      const errorMsg: ErrorMessage = { type: 'error', message: 'Invalid workspace_state: workspace (non-empty string), totalTasks and completedTasks (numbers) are required' };
+      ws.send(JSON.stringify(errorMsg));
+      return;
+    }
 
-    //NOTE(jimmylee): Normalize with server-side agent info
+    agent.lastSeen = new Date().toISOString();
+    agent.alive = true;
+
+    //NOTE(jimmylee): Normalize with server-side agent info — coerce optional numeric fields
     const stateMsg: WorkspaceStateMessage = {
       type: 'workspace_state',
       name: agent.name,
       id: agent.id,
       workspace: msg.workspace,
-      planNumber: msg.planNumber,
+      planNumber: typeof msg.planNumber === 'number' ? msg.planNumber : 0,
       totalTasks: msg.totalTasks,
       completedTasks: msg.completedTasks,
-      blockedTasks: msg.blockedTasks,
-      inProgressTasks: msg.inProgressTasks,
+      blockedTasks: typeof msg.blockedTasks === 'number' ? msg.blockedTasks : 0,
+      inProgressTasks: typeof msg.inProgressTasks === 'number' ? msg.inProgressTasks : 0,
       timestamp: new Date().toISOString(),
     };
 
@@ -699,16 +821,41 @@ export class SpaceServer {
       lastSeen: now,
     });
 
+    //NOTE(jimmylee): Clean up agent state tracking to prevent memory growth
+    this.agentStates.delete(agent.name);
+
+    //NOTE(jimmylee): Clean up workspace states owned by this agent
+    for (const [key, state] of this.workspaceStates) {
+      if (state.name === agent.name) {
+        this.workspaceStates.delete(key);
+      }
+    }
+
+    //NOTE(jimmylee): Clean up active claims owned by this agent
+    //NOTE(jimmylee): Prevents departed agent's claims from blocking others for up to 60s
+    for (const [key, claim] of this.activeClaims) {
+      if (claim.name === agent.name) {
+        this.activeClaims.delete(key);
+      }
+    }
+
     //NOTE(jimmylee): Broadcast updated presence to all
     this.broadcastPresence();
   }
 
   //NOTE(jimmylee): Broadcast a message to all connected agents
+  //NOTE(jimmylee): Wraps each send in try-catch so one bad socket doesn't kill delivery to remaining agents
   private broadcast(msg: SpaceMessage): void {
     const data = JSON.stringify(msg);
     for (const [ws] of this.agents) {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+        try {
+          ws.send(data);
+        } catch (err) {
+          //NOTE(jimmylee): Socket send failed — skip this agent, 'close' event will handle cleanup
+          const agent = this.agents.get(ws);
+          console.error(`[broadcast] Send failed for agent=${agent?.name ?? 'unknown'}: ${String(err)}`);
+        }
       }
     }
   }
@@ -722,29 +869,41 @@ export class SpaceServer {
     this.broadcast(presenceMsg);
   }
 
-  //NOTE(jimmylee): Heartbeat: ping every HEARTBEAT_INTERVAL_MS, disconnect if no pong within HEARTBEAT_TIMEOUT_MS
+  //NOTE(jimmylee): Heartbeat: ping every HEARTBEAT_INTERVAL_MS, disconnect if no pong by the next tick
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
+      //NOTE(jimmylee): Collect dead agents first, then disconnect after iteration
+      //NOTE(jimmylee): Calling handleDisconnect during iteration modifies the Map which is unsafe
+      const dead: WebSocket[] = [];
       for (const [ws, agent] of this.agents) {
         if (!agent.alive) {
-          //NOTE(jimmylee): No pong received since last ping — disconnect
-          ws.terminate();
-          this.handleDisconnect(ws);
-          continue;
+          dead.push(ws);
+        } else {
+          agent.alive = false;
+          ws.ping();
         }
-        agent.alive = false;
-        ws.ping();
+      }
+      for (const ws of dead) {
+        ws.terminate();
+        this.handleDisconnect(ws);
       }
     }, HEARTBEAT_INTERVAL_MS);
   }
 
-  //NOTE(jimmylee): Periodic sweep of expired claims to prevent unbounded memory growth
+  //NOTE(jimmylee): Periodic sweep of expired claims and stale workspace states
   private startClaimCleanup(): void {
     this.claimCleanupTimer = setInterval(() => {
       const now = Date.now();
+      //NOTE(jimmylee): Clean up expired claims
       for (const [key, claim] of this.activeClaims) {
         if (now - claim.timestamp > CLAIM_TTL_MS) {
           this.activeClaims.delete(key);
+        }
+      }
+      //NOTE(jimmylee): Clean up stale workspace states (older than WORKSPACE_STATE_TTL_MS)
+      for (const [key, state] of this.workspaceStates) {
+        if (now - new Date(state.timestamp).getTime() > WORKSPACE_STATE_TTL_MS) {
+          this.workspaceStates.delete(key);
         }
       }
     }, CLAIM_CLEANUP_INTERVAL_MS);

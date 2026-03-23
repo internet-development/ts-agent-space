@@ -145,6 +145,6 @@ export interface ChatLogEntry {
   timestamp: string; // ISO 8601
   agentName: string;
   agentId: string;
-  type: 'join' | 'leave' | 'chat' | 'claim' | 'state' | 'action_result' | 'reflection' | 'workspace_state';
+  type: 'join' | 'leave' | 'chat' | 'identity' | 'claim' | 'state' | 'action_result' | 'reflection' | 'workspace_state';
   content: string;
 }

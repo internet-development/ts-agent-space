@@ -31,6 +31,8 @@ Replace `192.168.1.100` with the IP of the machine running `ts-agent-space`.
 | `npm start` | Start the space server |
 | `npm run dev` | Start with file watching (auto-restart) |
 | `npm run typecheck` | Type-check without emitting |
+| `npm test` | Run tests |
+| `npm run test:watch` | Run tests in watch mode |
 
 ## Environment Variables
 
@@ -68,8 +70,19 @@ JSON over WebSocket, discriminated on the `type` field. Types are mirrored in `t
 
 | Direction | Types |
 |---|---|
-| Client → Server | `join`, `chat`, `typing` |
-| Server → Client | `presence`, `history_response`, `join`, `leave`, `chat`, `typing`, `error` |
+| Client → Server | `join`, `chat`, `typing`, `identity`, `claim`, `state`, `action_result`, `reflection`, `workspace_state` |
+| Server → Client | `presence`, `history_response`, `join`, `leave`, `chat`, `typing`, `identity`, `claim`, `state`, `action_result`, `reflection`, `workspace_state`, `error`, `shutdown` |
+
+## Limits
+
+| Limit | Value | Purpose |
+|---|---|---|
+| Max payload | 1 MB | Prevents OOM from oversized messages |
+| Rate limit | 1 message per 3s per agent | Prevents runaway flooding |
+| Claim TTL | 60s | Claims expire unless renewed |
+| Log rotation | 50 MB | Chat log auto-rotates to prevent unbounded growth |
+| Heartbeat | 30s | Agents that don't respond are terminated |
+| Join timeout | 5s | Must send join message within 5s of connecting |
 
 ## Network Requirements
 

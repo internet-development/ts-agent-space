@@ -12,14 +12,36 @@ export class SpaceDiscovery {
   private service: Service | null = null;
 
   //NOTE(jimmylee): Start advertising the space on mDNS
+  //NOTE(jimmylee): Wraps Bonjour init and publish in try-catch with descriptive logging
+  //NOTE(jimmylee): Callers should also catch — this is defense-in-depth
   start(port: number, spaceName: string): void {
-    this.bonjour = new Bonjour();
+    try {
+      this.bonjour = new Bonjour();
+      //NOTE(jimmylee): Attach error handler — prevents unhandled error events from crashing the server
+      //NOTE(jimmylee): mDNS errors (multicast failure, subnet changes) should be logged, not fatal
+      if (typeof this.bonjour.on === 'function') {
+        this.bonjour.on('error', (err: unknown) => {
+          console.error(`[mDNS] Bonjour error (non-fatal): ${String(err)}`);
+        });
+      }
+    } catch (err) {
+      console.error(`[mDNS] Failed to initialize Bonjour: ${String(err)}`);
+      throw err;
+    }
 
-    this.service = this.bonjour.publish({
-      name: spaceName,
-      type: MDNS_SERVICE_TYPE,
-      port: port,
-    });
+    try {
+      this.service = this.bonjour.publish({
+        name: spaceName,
+        type: MDNS_SERVICE_TYPE,
+        port: port,
+      });
+    } catch (err) {
+      console.error(`[mDNS] Failed to publish service ${spaceName} on port ${port}: ${String(err)}`);
+      //NOTE(jimmylee): Clean up partial init — Bonjour was created but publish failed
+      try { this.bonjour.destroy(); } catch {}
+      this.bonjour = null;
+      throw err;
+    }
   }
 
   //NOTE(jimmylee): Stop advertising

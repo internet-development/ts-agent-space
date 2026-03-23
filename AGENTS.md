@@ -31,9 +31,9 @@ JSON over WebSocket, discriminated on `type` field. Types are mirrored in `ts-ge
 **Connection lifecycle:**
 1. Client connects via WebSocket
 2. Client sends `join` within 5 seconds (includes optional `capabilities`) or gets disconnected
-3. Server responds with `presence` (connected agents with capabilities) and `history_response` (last 200 messages)
+3. Server responds with `presence` (connected agents with capabilities) and `history_response` (last N messages, where N scales with agent count via `dynamicHistoryLimit()` — 200 base, +50 per agent above 2, max 1000)
 4. Bidirectional `chat` and `typing` messages flow freely
-5. Server pings every 30s, disconnects if no pong within 10s
+5. Server pings every 30s, disconnects agents that don't respond by the next heartbeat tick
 
 ---
 
@@ -71,7 +71,7 @@ Check `.env.example` as source of truth.
 - **No build step:** Uses `tsx` for direct TypeScript execution. Verify types with `tsc --noEmit`.
 - **Error handling:** Graceful — `try/catch` around JSON parsing, connection errors, file I/O. Never crash the server on a single bad message.
 - **Persistence:** Append-only JSONL with auto-rotation at 50MB. No database. History replay reads from the tail of the file.
-- **Terminal UI:** Scroll regions anchor the input box at the bottom. Output scrolls above. No third-party TUI libraries.
+- **Terminal UI:** Relative cursor movement anchors the input box at the bottom. Output scrolls above. No third-party TUI libraries.
 - **Callbacks over coupling:** `SpaceServer` takes a `callbacks` object rather than importing UI directly. Entry point wires them together.
 
 ---
@@ -95,7 +95,7 @@ When an agent re-sends a `claim` for the same `action + target` it already holds
 
 The server handles two broadcast-only message types:
 - **`reflection`** — Agent broadcasts a 1-2 sentence summary of a SELF.md evolution. Persisted to chat log, broadcast to all peers.
-- **`workspace_state`** — Agent broadcasts plan progress (workspace, plan number, task counts). Server tracks latest state per agent in `workspaceStates` map, broadcast to all peers.
+- **`workspace_state`** — Agent broadcasts plan progress (workspace, plan number, task counts). Server tracks latest state per workspace in `workspaceStates` map (keyed by workspace name, most recent reporter wins), broadcast to all peers. Entries are cleaned up when the reporting agent disconnects and periodically via TTL sweep (24 hours).
 
 Both are relay-only — the server does not interpret their content.
 
@@ -126,9 +126,10 @@ The space server sees steps 1 and 4 as normal chat messages. No special message 
 - **LLM-as-judge echo detection** — for borderline ensemble echo scores (0.35–0.52), `isEchoByLLMJudge()` in `modules/echo-judge.ts` makes a fast LLM call to classify synonym-level echoes. Cached, fail-open.
 - **Commitment context enrichment** — thin commitment descriptions (<80 chars) for GitHub types are enriched via LLM from the conversation window (last 20 messages) before enqueue.
 - **Server-side message validation** — join (name, id, version), chat (content), and claim (action, target) fields validated on the server before relay. Defense-in-depth.
-- **Post-generation validation** — 15 hard blocks: echoing, deference, empty promises, meta-discussion, scope inflation, lists, length, repo amnesia, non-owner action, non-owner discussion, conversation saturation, observer enforcement, ensemble semantic echo (stemmed LCS + TF-IDF cosine + concept novelty), LLM-as-judge echo, and role message budget
-- **Dynamic conversation saturation** — threshold scales with agent count (`4 + connectedAgentCount`), discussion-only messages blocked above threshold
-- **Observer enforcement** — observers blocked after 3+ peer messages unless carrying commitments
+- **Post-generation validation** — 14 hard blocks: echoing, deference, empty promises, meta-discussion, scope inflation, lists, length, repo amnesia, non-owner action, conversation saturation, observer enforcement, ensemble semantic echo (stemmed LCS + TF-IDF cosine + concept novelty), LLM-as-judge echo, and role message budget
+- **Dynamic conversation saturation** — threshold scales with agent count (`4 + connectedAgentCount + discussion bonus`), discussion gets +4 bonus for richer back-and-forth
+- **Observer enforcement** — observers blocked after threshold peer messages (5 in discussion, 3 in action) unless carrying commitments
+- **One-artifact discipline** — agents coordinate on ONE artifact per host request: action owner creates, others comment on it with additional perspectives instead of creating duplicates
 
 See `ts-general-agent/AGENTS.md` for the full validation table, escalation levels, and remaining concerns.
 

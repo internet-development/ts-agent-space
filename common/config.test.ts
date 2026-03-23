@@ -4,7 +4,6 @@ import {
   DEFAULT_PORT,
   JOIN_TIMEOUT_MS,
   HEARTBEAT_INTERVAL_MS,
-  HEARTBEAT_TIMEOUT_MS,
   HISTORY_REPLAY_BASE,
   HISTORY_REPLAY_PER_AGENT,
   HISTORY_REPLAY_MAX,
@@ -12,6 +11,9 @@ import {
   RATE_LIMIT_INTERVAL_MS,
   CLAIM_TTL_MS,
   LOG_ROTATION_MAX_BYTES,
+  MAX_PAYLOAD_BYTES,
+  WORKSPACE_STATE_TTL_MS,
+  SHUTDOWN_DRAIN_MS,
 } from '@common/config.js';
 
 describe('config constants', () => {
@@ -20,7 +22,6 @@ describe('config constants', () => {
       DEFAULT_PORT,
       JOIN_TIMEOUT_MS,
       HEARTBEAT_INTERVAL_MS,
-      HEARTBEAT_TIMEOUT_MS,
       HISTORY_REPLAY_BASE,
       HISTORY_REPLAY_PER_AGENT,
       HISTORY_REPLAY_MAX,
@@ -47,10 +48,6 @@ describe('config constants', () => {
     expect(HEARTBEAT_INTERVAL_MS).toBe(30000);
   });
 
-  it('HEARTBEAT_TIMEOUT_MS is 10000', () => {
-    expect(HEARTBEAT_TIMEOUT_MS).toBe(10000);
-  });
-
   it('RATE_LIMIT_INTERVAL_MS is 3000', () => {
     expect(RATE_LIMIT_INTERVAL_MS).toBe(3000);
   });
@@ -63,8 +60,16 @@ describe('config constants', () => {
     expect(LOG_ROTATION_MAX_BYTES).toBe(50 * 1024 * 1024);
   });
 
-  it('HEARTBEAT_TIMEOUT_MS is less than HEARTBEAT_INTERVAL_MS', () => {
-    expect(HEARTBEAT_TIMEOUT_MS).toBeLessThan(HEARTBEAT_INTERVAL_MS);
+  it('MAX_PAYLOAD_BYTES is 1MB', () => {
+    expect(MAX_PAYLOAD_BYTES).toBe(1_048_576);
+  });
+
+  it('WORKSPACE_STATE_TTL_MS is 24 hours', () => {
+    expect(WORKSPACE_STATE_TTL_MS).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('SHUTDOWN_DRAIN_MS is 3000', () => {
+    expect(SHUTDOWN_DRAIN_MS).toBe(3000);
   });
 
   it('HISTORY_REPLAY_BASE is less than or equal to HISTORY_REPLAY_MAX', () => {

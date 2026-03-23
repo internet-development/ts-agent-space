@@ -142,6 +142,35 @@ describe('ChatPersistence', () => {
     expect(result).toEqual([]);
   });
 
+  it('handles UTF-8 multi-byte characters at chunk boundaries', () => {
+    const persistence = new ChatPersistence(tmpDir);
+
+    //NOTE(jimmylee): Write enough entries with emoji/unicode to force chunk boundary splits
+    //NOTE(jimmylee): Each entry is ~150 bytes; 8192 / 150 ≈ 54 entries per chunk
+    //NOTE(jimmylee): Writing 70 entries ensures at least one chunk boundary crossing
+    for (let i = 0; i < 70; i++) {
+      persistence.append(
+        makeEntry({
+          content: `emoji-test-${i}-🎨🔧💡-café-naïve-über-日本語テスト`,
+          timestamp: new Date(Date.UTC(2025, 0, 1, 0, 0, i)).toISOString(),
+        })
+      );
+    }
+
+    const result = persistence.getRecentHistory(70);
+    expect(result).toHaveLength(70);
+    //NOTE(jimmylee): Verify none of the entries have replacement characters from UTF-8 boundary corruption
+    for (const entry of result) {
+      expect(entry.content).not.toContain('\uFFFD');
+      expect(entry.content).toContain('🎨🔧💡');
+      expect(entry.content).toContain('café');
+      expect(entry.content).toContain('日本語テスト');
+    }
+    //NOTE(jimmylee): Verify first and last entries
+    expect(result[0].content).toBe('emoji-test-0-🎨🔧💡-café-naïve-über-日本語テスト');
+    expect(result[69].content).toBe('emoji-test-69-🎨🔧💡-café-naïve-über-日本語テスト');
+  });
+
   it('handles malformed JSON lines by skipping them', () => {
     const persistence = new ChatPersistence(tmpDir);
     const filePath = path.join(tmpDir, 'data', 'chat.jsonl');

@@ -7,7 +7,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 dotenvConfig();
 
-import { DEFAULT_PORT } from '@common/config.js';
+import { DEFAULT_PORT, SHUTDOWN_DRAIN_MS } from '@common/config.js';
 import type { AgentPresence } from '@common/types.js';
 import { ui, getTerminalWidth } from '@modules/ui.js';
 import { SpaceServer } from '@modules/server.js';
@@ -99,24 +99,34 @@ async function main(): Promise<void> {
   let inputBuffer = '';
   let cursorPos = 0;
 
-  //NOTE(jimmylee): Graceful departure
+  //NOTE(jimmylee): Graceful departure with drain period
+  //NOTE(jimmylee): Broadcasts shutdown, waits for agents to finish in-flight work, then closes
   const shutdown = (reason: string): void => {
     if (shouldExit) return;
     shouldExit = true;
 
     ui.system('Shutting down', reason);
+    ui.system('Drain period', `waiting ${SHUTDOWN_DRAIN_MS / 1000}s for in-flight operations`);
 
-    server.stop();
-    discovery.stop();
+    //NOTE(jimmylee): Broadcast shutdown message first so agents know to wrap up
+    //NOTE(jimmylee): server.broadcastShutdown() sends the message WITHOUT closing connections,
+    //NOTE(jimmylee): giving agents time to finish in-flight work during the drain period
+    server.broadcastShutdown();
 
-    ui.finalizeInputBox();
-    ui.printFarewell();
+    //NOTE(jimmylee): Wait for drain period before fully closing connections
+    setTimeout(() => {
+      server.stop();
+      discovery.stop();
 
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
-    }
-    process.stdin.pause();
-    process.exit(0);
+      ui.finalizeInputBox();
+      ui.printFarewell();
+
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
+      process.exit(0);
+    }, SHUTDOWN_DRAIN_MS);
   };
 
   //NOTE(jimmylee): Ensure terminal state is restored on ANY exit path
